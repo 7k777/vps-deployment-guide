@@ -207,7 +207,7 @@ URL：http://VPS-IP:8000/sse
 | 2 | 重启后 SSH 连不上 | 等 30~60 秒让 SSHD 启动完成 |
 | 3 | `WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED` | `ssh-keygen -R 你的IP` 清除旧密钥缓存 |
 | 4 | `apt upgrade` 弹配置界面 | 直接回车，选默认选项 |
-| 5 | VPN 连不上 | `ss -tlnp \| grep 443` 检查 xray 是否在监听 |
+| 5 | 网络连不上 | `ss -tlnp \| grep 443` 检查服务是否在监听 |
 | 6 | MCP v2 API 不兼容 | 用 `pip3 install "mcp<2.0"` 降级到 v1 |
 | 7 | systemd 启动报 `TypeError` | 在 Service 中加 `Environment=TERM=xterm-256color` |
 | 8 | 杀进程把自己断连 | 确保新服务先跑起来，再杀旧的 |
