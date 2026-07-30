@@ -2,14 +2,14 @@
 
 > **一次从零开始部署个人 VPS 服务的完整记录**
 >
-> 涵盖：服务器初始化 · 代理配置 · MCP 服务部署 · systemd 管理 · 10 个实战踩坑
+> 涵盖：服务器初始化 · 网络配置 · MCP 服务部署 · systemd 管理 · 10 个实战踩坑
 
 ---
 
 ## 📋 目录
 
 - [1. 基础环境配置](#1-基础环境配置)
-- [2. 代理服务搭建（x-ui）](#2-代理服务搭建x-ui)
+- [2. 网络服务配置（x-ui）](#2-网络服务配置x-ui)
 - [3. VPS MCP 服务](#3-vps-mcp-服务)
 - [4. 踩坑记录（10 个）](#4-踩坑记录10-个)
 - [5. 环境信息](#5-环境信息)
@@ -35,7 +35,7 @@ reboot
 
 ```bash
 ufw allow 22      # SSH
-ufw allow 443     # 代理
+ufw allow 443     # 网络
 ufw allow 面板端口  # 管理面板
 ufw allow 8000    # MCP 服务
 ufw allow 18110   # 其他服务
@@ -44,11 +44,11 @@ ufw enable
 
 ---
 
-## 2. 代理服务搭建（x-ui）
+## 2. 网络服务配置（x-ui）
 
 ### 2.1 安装 x-ui
 
-x-ui 是一个多协议代理管理面板，可用于反向代理、内网穿透等场景。
+x-ui 是一个多协议网络管理面板，可用于反向网络、内网穿透等场景。
 
 ```bash
 bash <(curl -Ls https://raw.githubusercontent.com/vaxilu/x-ui/master/install.sh)
