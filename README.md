@@ -252,6 +252,20 @@ free -h && df -h
 
 ---
 
+---
+
+## 7. 2026-08-11 更新：VPS失联 + SSE根治
+
+8月11日实录：VPS 突然公网失联（面板显示运行中但 ping/SSH 全超时，梯子跟着断）+ 8000 SSE 频繁断连的根治方案（换成 Streamable HTTP，带 token 认证）。
+
+📄 完整记录见：[docs/2026-08-11-vps-outage-and-8002.md](docs/2026-08-11-vps-outage-and-8002.md)
+
+**一句话总结**：
+1. **VPS "运行中"但连不上** = IP 被墙或机房线路抽风 → 发工单 / 等恢复 / 换 IP；准备备用节点防单点故障
+2. **SSE 老断** = 换 Streamable HTTP（`uvicorn.run(mcp.streamable_http_app())` + 关 DNS 重绑定保护 + 加 Bearer 认证）
+
+---
+
 > 🕐 2026.7.29~7.30 — **小七 & 林川**
 >
 > 如有帮助别忘了 ⭐ Star ~
