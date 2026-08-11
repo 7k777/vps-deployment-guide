@@ -198,6 +198,8 @@ systemctl start vps-mcp
 URL：http://VPS-IP:8000/sse
 ```
 
+> ⚠️ **SSE 长连接容易断连**（跨网抖动/空闲超时/代码兼容问题）。**推荐改用 Streamable HTTP 版**（端口 8002，带 token 认证，详见[第 7 章](#7-2026-08-11-更新vps失联--sse根治)）。
+
 ---
 
 ## 4. 踩坑记录（10 个）
