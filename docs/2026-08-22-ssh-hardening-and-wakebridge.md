@@ -1,4 +1,4 @@
-# 2026-08-22 实战：SSH 加固排查 + Wake Bridge 常驻
+# 2026-08-22 实战：SSH 加固排查
 
 ## 1. 密码登录"改了没生效"的坑
 
@@ -22,34 +22,14 @@
 scp -i 本机密钥 -P 22022 root@SERVER:/服务器/密钥路径 本地路径
 ```
 
-## 3. Wake Bridge systemd 常驻
-
-```ini
-[Unit]
-Description=Wake Bridge V0.1
-After=network.target
-
-[Service]
-WorkingDirectory=/root/wakebridge
-ExecStart=/usr/bin/python3 /root/wakebridge/wakebridge.py run --interval 60
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-```
-
-坑：非交互 shell 里 `~` 可能不展开（MCP 环境），部署路径变成字面 `~/wakebridge`，导致 systemd 报 `Failed at step CHDIR`。
-
-排查：`journalctl -u wakebridge` 看 CHDIR 错误 → `find / -name wakebridge.py` 定位实际路径 → 移动到正确位置 → `systemctl restart`。
-
-## 4. 双机加固流程速查
+## 3. 双机加固流程速查
 
 1. 封爆破 IP：`ufw deny from <IP>`（全封）
 2. fail2ban：`apt install fail2ban && systemctl enable --now fail2ban`（默认自带 sshd jail）
 3. 禁密码：`echo 'PasswordAuthentication no' > /etc/ssh/sshd_config.d/99-hardening.conf && systemctl restart ssh && sshd -T` 验证
 4. 密钥验证：`ssh -v -i <key> -p <port> root@<ip>`（看 `Offering public key` 行）
 
-## 5. 防火墙概念大白话
+## 4. 防火墙概念大白话
 
 - 端口 = 门（每扇门通向不同服务）
 - `Anywhere` = 谁都能进这扇门
