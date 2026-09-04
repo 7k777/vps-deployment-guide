@@ -1,0 +1,11 @@
+.env
+.env.*
+*.key
+*.pem
+*.crt
+id_rsa
+id_ed25519
+config.json
+__pycache__/
+*.pyc
+node_modules/
