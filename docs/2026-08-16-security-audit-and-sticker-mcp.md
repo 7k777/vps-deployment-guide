@@ -1,86 +1,74 @@
-# 2026-08-16 安全巡检 + 表情包 MCP 部署实战
+# 2026-08-16：安全巡检与 sticker-mcp 部署
 
-> 实战记录：一次深夜巡检抓出 3.4 万次爆破 + 把 AI 发表情包的服务从零部署上线。
+## SSH 扫描与加固
 
-## 一、SSH 暴力破解的发现与处置
+公网 SSH 被自动扫描很常见。日志中出现大量失败不等于已经入侵，还需检查成功登录、授权密钥、异常账户和进程。
 
-巡检 `auth.log` 发现 **34913 次 Failed password**（僵尸网络，单 IP 打了 1.4 万次）。处置：
+处置顺序：
+
+1. 保留当前会话，从第二个终端验证密钥登录；
+2. 禁用密码和键盘交互认证；
+3. 启用 Fail2Ban，并验证 jail、过滤器和防火墙链；
+4. 对已确认来源临时止血时，把拒绝规则插在允许规则之前，或使用对应 Fail2Ban jail。
 
 ```bash
-# 1. 封禁恶意 IP（top 5）
-ufw deny from 恶意IP
-
-# 2. 关闭密码登录（先验证密钥能登录！）
-ssh -i 你的私钥 -p 端口 root@127.0.0.1 "echo KEY-LOGIN-OK"
-sed -i 's/^PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
-systemctl restart ssh
-
-# 3. 装 fail2ban（自动封禁暴力尝试）
-apt-get install -y fail2ban
-systemctl enable --now fail2ban
+sudo ufw insert 1 deny from <MALICIOUS_IP>
+sudo fail2ban-client status sshd
+sudo fail2ban-regex /var/log/auth.log /etc/fail2ban/filter.d/sshd.conf
 ```
 
-> ⚠️ 禁密码前**必须先用密钥验证能登录**，否则把自己锁外面。
+封禁单个 IP 不能替代密钥认证、限速和持续监控。
 
-## 二、定期巡检机制（承诺靠不住，机制才靠得住）
+## 定期巡检
 
-巡检脚本 `/opt/security-audit.sh`，检查：
+巡检应覆盖：
 
-- 监听端口基线（新增端口告警）
-- crontab md5（被篡改告警）
-- authorized_keys（被塞后门公钥告警）
-- 高 CPU 陌生进程
-- /tmp /var/tmp 新增文件
-- SSH 爆破次数（>20 告警）
+- 监听端口与防火墙基线；
+- SSH 成功/失败登录和 `authorized_keys` 变化；
+- 高 CPU、异常常驻进程和失败的 systemd 单元；
+- 磁盘、日志与临时目录增长；
+- Fail2Ban jail、过滤器及防火墙链是否真实生效；
+- 告警通道能否实际送达。
 
-异常推 Bark 到手机，基线存 `/opt/security-audit-base/`。crontab 每周一 9:00 跑：
+脚本、告警地址和基线文件中不得硬编码公开 token。定时任务应明确服务器时区，优先使用 systemd timer，避免误解 cron 的执行时间。
+
+## 废弃端口清理
+
+服务停用或改走反向代理后，应同步删除多余的公网规则：
 
 ```bash
-# ⚠️ VPS 时区是 UTC！北京 9:00 = UTC 1:00
-0 1 * * 1 /opt/security-audit.sh
+sudo ufw delete allow <OLD_PORT>/tcp
+sudo ss -lntup
+sudo ufw status numbered
 ```
 
-## 三、废弃端口清理
+## sticker-mcp 部署原则
 
-服务迁走/停用后，UFW 规则要同步删（减少暴露面）：
-
-```bash
-ufw delete allow 端口号/tcp
-```
-
-## 四、sticker-mcp 部署（AI 发表情包）
-
-[asashiki/sticker-mcp](https://github.com/asashiki/sticker-mcp)：MCP 服务器，让 AI 在聊天里发贴纸/表情包，自带网页管理后台。
+部署第三方 MCP 服务前先审查依赖、认证和默认监听地址：
 
 ```bash
-git clone https://github.com/asashiki/sticker-mcp.git
-cd sticker-mcp
-npm install
+git clone <REPOSITORY_URL>
+cd <PROJECT_DIR>
+npm ci
 npm run build
-# systemd 托管 + nginx https 反代 + 防火墙放行
 ```
 
-工具：`send_sticker`（按情绪发）/ `list_available_stickers` / `add_sticker` / `create_sticker_upload`。
+- 固定依赖并提交 lockfile；
+- 使用 systemd 托管；
+- 应用监听 `127.0.0.1`；
+- 由 Nginx 提供 HTTPS 和认证；
+- 不为后端端口额外开放 UFW；
+- 从外部网络验证域名入口。
 
-## 五、UFW 假象大坑（重点！）
+## 本机测试的假象
 
-**现象**：服务部署完，VPS 本机 curl 公网地址返回 200，但外部机器（手机/另一台 VPS）连不上，超时。
-
-**真相**：配置 nginx 时某行报错，`&&` 命令链中断，`ufw allow` 那步**根本没执行**；而 VPS 本机 curl 自己的公网 IP 走本地流量**绕过 UFW**，200 是假象！
-
-**教训**：新端口必须**从外部机器**测试公网连通，不能只在本机自测。
-
-## 六、验证
-
-用另一台 VPS（外部网络）测试：
+VPS 本机访问自己的公网地址成功，不一定代表外部网络可达；路径可能绕过预期的防火墙链。完成部署后至少验证：
 
 ```bash
-curl -X POST https://域名:端口/mcp/sticker -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
-# → 200 = 通了
+sudo nginx -t
+sudo ufw status numbered
+sudo ss -lntup
 ```
 
-## 今日金句
+然后使用另一台主机或移动网络请求公开域名。服务返回的状态码必须结合协议判断，例如未认证时的 401、MCP 端点对普通 GET 返回的 405/406，也可能说明入口已经可达。
 
-- **承诺靠不住，机制才靠得住**（例行检查全部装进 crontab）
-- **本机自测 200 不算数，外部访问才是真的**
