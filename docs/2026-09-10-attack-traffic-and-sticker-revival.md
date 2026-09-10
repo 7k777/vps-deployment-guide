@@ -1,143 +1,116 @@
-# 攻击流量排障与 sticker-mcp 复活（2026-09-10 实战）
+# 2026-09-10—11：攻击排障、SYN 防护与服务恢复
 
-## 现象
+## 事故表现
 
-用户访问多个服务时浏览器显示「服务器已停止响应」（白屏等待后超时），怀疑服务器宕机或数据丢失。
+多个站点出现白屏、加载超时或“服务器已停止响应”。主机仍在线，Nginx 进程正常，CPU、内存和磁盘没有耗尽，也没有 OOM 或入侵证据。
 
-## 排查过程
+## 分层排查结果
 
-1. **先确认服务端状态**：`uptime` 负载 0.00，两台服务器都活着，nginx active，端口都在监听。
-2. **从外部验证服务**：curl 各 HTTPS 端口——大部分正常，个别端口响应变慢。
-3. **查 nginx 错误日志**（关键证据）：
-   ```
-   tail -20 /var/log/nginx/error.log | grep \[error\]
-   ```
-   发现大量 `connect() failed (111)` 和来自同一 IP 的密集请求。
+### 主机与 Nginx
 
-## 根因
+- 两台主机负载正常，无 OOM；
+- Nginx active，错误日志没有足以解释全站超时的异常峰值；
+- 事故时段 HTTP 请求量不高，不能支持“海量完整 HTTP 请求打满 worker”的说法。
 
-自动化扫描攻击：攻击者 IP 对服务器发起 PHP 漏洞探测（phpunit、thinkphp、pearcmd、Docker API 探测等），请求量巨大，**挤占 nginx worker 连接**，导致正常用户请求排队超时，浏览器表现为「服务器已停止响应」。
+### 应用层
 
-这不是服务器宕机，是攻击流量造成的假象。
+- 一个已停用站点仍保留 Nginx 反代，持续产生 `connect() failed (111)`；清理空壳配置后噪音消失；
+- sticker-mcp 曾处于 stopped/disabled，恢复服务并启用开机自启后正常；
+- 管理 MCP 使用单 Uvicorn 进程，工具函数中存在最长 120 秒的同步 `subprocess.run`，会阻塞 ASGI 事件循环。
 
-## 处置
+### 攻击流量
 
-1. **封禁攻击 IP**（两台服务器都执行）：
-   ```bash
-   for ip in <攻击者IP列表>; do ufw deny from $ip; done
-   ```
-   通过 `awk '{print $1}' access.log | sort | uniq -c | sort -rn | head` 找出高频 IP，两台服务器共封 20 个。
-2. **确认 fail2ban 在跑**：`systemctl is-active fail2ban`，作为自动防线。
-3. **封禁后复测**：服务响应时间从超时恢复到 0.5~0.7s。
+日志中确认存在 PHP、phpunit、pearcmd、Docker API、`.env`、`.git` 等自动扫描请求，但完整 HTTP 请求数量不足以单独解释全站超时。
 
-## 顺带挖出的隐藏问题
+最初曾将“延迟升高、请求日志少、封禁后恢复”解释为 Slowloris，并写成“已经钉死”。这个结论证据不足：
 
-### 1. sticker-mcp 服务长期停摆
+- 5 秒响应只能证明当时变慢，不能证明 worker 被慢连接占满；
+- Nginx 是事件驱动架构，一个空闲连接不等于独占一个 worker 进程；
+- UFW 重载与恢复时间吻合属于相关性，不足以唯一确定攻击类型；
+- 事故发生时没有保存 `ss` 连接状态快照，因此无法事后对 Slowloris 定案。
 
-- nginx 转发 8447 → 127.0.0.1:3000 一直报 111（连接失败）
-- 查 `systemctl status sticker-mcp`：服务 **disabled 且 dead**，日志显示 8/15 被 stop 后再没启动
-- 处置：`systemctl enable sticker-mcp && systemctl start sticker-mcp`，验证 3000 端口监听、8447 返回 406（MCP 端点正常响应）
+后续巡检直接观察到：正常 ESTABLISHED 连接很少，但 80/443 上出现数十条 `SYN-RECV`，峰值约为 **76**，而当时 `tcp_max_syn_backlog` 只有 **128**。来源分散在多个网段。这是当时捕获到的网络层 SYN flood 证据，能够解释为什么请求尚未进入 Nginx 日志、浏览器却可能在握手阶段超时。
 
-### 2. 空壳站点残留
+严谨结论：**自动扫描与 SYN flood 均真实存在；事故表现与半连接队列压力一致，但由于事故时缺少连接快照，不能把最初那次超时百分之百归因于某一种攻击。**
 
-- radar.newkis.cc 的 nginx 配置还在，但后端（3017 端口）早已没有服务
-- 攻击者持续扫描该域名，nginx 日志刷满 111 错误
-- 处置：`rm /etc/nginx/sites-enabled/ai-needs-radar && nginx -t && systemctl reload nginx`
+## 已实施处置
 
-## 补充：慢连接攻击——日志盲区（9/10 深夜追查钉死）
+### Nginx
 
-**现象**：用户访问超时（"服务器已停止响应"），但 nginx access.log 请求数很少（107 条/30 分钟）、error.log 也正常——看起来"没被攻击"。
+- 全站请求速率与单 IP 连接数限制；
+- 缩短请求头、请求体、发送和 keep-alive 超时；
+- 只启用 TLS 1.2/1.3，隐藏版本信息；
+- 配置 Cloudflare 官方可信代理网段和 `CF-Connecting-IP`，让日志、限速与 Fail2Ban 使用真实客户端地址；
+- 修改管理 MCP 的访问日志格式，不再记录 URL 查询参数。
 
-**真相**：慢连接攻击（Slowloris 类）。攻击者建立连接后慢慢发数据/读响应，每个连接占住一个 nginx worker 槽位长达 proxy_read_timeout（300s），却不产生多少日志。
+> Cloudflare IP 段会变化，应从官方列表定期更新。只有可信代理地址可以改写真实客户端 IP。
 
-**钉死机制的关键证据**：
-1. 事故时段某端口响应 5.1 秒（正常 0.15s）——worker 被占的实锤
-2. 封 IP 操作触发 ufw 重载（iptables-restore）→ 瞬间中断所有连接 → 攻击者慢连接断开 → worker 释放 → 服务器恢复
-3. 用户恢复时间点（封完 IP 后 3-13 分钟）与操作时间线完全吻合
+### Fail2Ban 与防火墙
 
-**教训**：
-- 排查"服务器慢/超时"不能只看请求数，要看**连接数**（ss -s、ESTABLISHED 统计）
-- 慢连接攻击是日志盲区：请求少、无错误日志、但 worker 被占满
-- **防御**：limit_conn（单 IP 连接上限）直接限制慢连接；fail2ban 封高频 IP；limit_req 限速
+- 建立 `nginx-attack` jail，识别常见恶意扫描路径；
+- 使用 `fail2ban-regex` 验证过滤器可命中历史样本；
+- 手动封禁通过对应 jail 执行，确保规则进入前置的 Fail2Ban 链；
+- 删除管理 MCP 和 tags 后端的公网放行，两个服务均只监听回环地址。
 
-## 教训
+刚启动 jail 后 `Total failed: 0` 不代表配置失效：该计数只统计本次运行期间的新事件，历史日志需要用 `fail2ban-regex` 单独验证。
 
-1. **「服务器停止响应」先查服务端再怪网络**：uptime + nginx error log 是第一步证据。
-2. **111 connect failed = 后端没监听**：nginx 转发失败时查 systemd 服务状态，别只盯着 nginx。
-3. **disabled 的服务会被遗忘**：定期巡检 `systemctl list-units --all` 检查有没有服务悄悄停着。
-4. **攻击流量会挤占 worker**：封 IP 立竿见影，fail2ban 是基础、手动封高频攻击者更快。
-5. **废弃站点要拆干净**：服务停了，nginx 配置和 DNS 记录也要一起清理，否则攻击者天天来敲门。
-6. **同一攻击团伙会同时打多台服务器**：一台被攻击时，另一台也要查。
+UFW 的顺序必须以实际链为准。不要笼统认为所有 `ufw deny from <IP>` 都必然无效；应使用 `ufw status numbered`、`iptables -S` 或 `nft list ruleset` 验证。需要把拒绝规则放到通用 ALLOW 之前时，可用：
 
-## 补充：ufw deny 顺序坑（当晚最大发现）
-
-**ufw 的 `deny from <ip>` 规则如果加在 ALLOW 端口规则之后，对开放端口完全无效。**
-
-iptables 按顺序匹配：从被封 IP 到开放端口的连接会**先命中 ACCEPT（放行）**，DENY 规则根本轮不到。实测两台服务器手动封的 23 个攻击 IP 全部被这个坑废掉。
-
-**正确封禁姿势**：
 ```bash
-# ❌ 无效（顺序坑）：ufw deny from <ip>
-# ✅ 有效（f2b 链在 INPUT 最前）：fail2ban-client set <jail> banip <ip>
-fail2ban-client set nginx-attack banip 43.110.38.5
+sudo ufw insert 1 deny from <MALICIOUS_IP>
 ```
 
-**误封教训**：把用户自己的出口 IP（成都电信 + ktor-client UA = RikkaHub 特征）误判为攻击者封了——幸好顺序坑让封禁没生效，用户全程无感。**封 IP 前必须查归属和 UA**；5G 移动网络出口 IP 动态变化，别拿 IP 当封禁依据。
+### SYN flood 内核缓解
 
-## 后续补充（深夜追查新增）
-
-### 1. 更正：封禁姿势从 ufw 改为 fail2ban
-
-**ufw deny 对开放端口无效（顺序坑），23 个攻击 IP 已改用 fail2ban 有效封禁**：
-```bash
-fail2ban-client set nginx-attack banip <ip>
-```
-同时删除两台服务器上所有无效的 `ufw deny from <ip>` 规则。
-
-### 2. fail2ban nginx-attack jail（自动封恶意扫描）
-
-两台服务器都配置了 nginx-attack jail：检测高频 4xx/5xx + phpunit/thinkphp/pearcmd/.env/.git 等攻击路径，3 次命中封 24h。
-```bash
-# /etc/fail2ban/filter.d/nginx-attack.conf
-failregex = ^<HOST> .* "(GET|POST|HEAD) .*(phpunit|thinkphp|pearcmd|\.env|\.git|wp-admin|wp-login|eval-stdin|/containers/json|actuator|solr|struts|web-inf|admin\.php|config\.php) .*" (4\d\d|5\d\d)
-# /etc/fail2ban/jail.d/nginx-attack.local
-[nginx-attack]
-enabled = true
-port = http,https
-filter = nginx-attack
-logpath = /var/log/nginx/access.log
-maxretry = 3
-findtime = 300
-bantime = 86400
+```ini
+# /etc/sysctl.d/99-syn-flood-hardening.conf
+net.ipv4.tcp_syncookies = 1
+net.ipv4.tcp_max_syn_backlog = 4096
+net.core.somaxconn = 4096
+net.ipv4.tcp_synack_retries = 2
 ```
 
-### 3. 全站限速 + 单 IP 连接上限
+这些参数提高主机对中小规模半连接洪泛的承受能力，但不能替代上游清洗或隐藏源站 IP。遭遇大流量 DDoS 时，主机本地配置无法挽救已被塞满的带宽。
 
-两台 nginx 都加了 limit_req（10r/s）+ limit_conn（单 IP 20 连接），MCP 端点单独放宽（burst 100）。**limit_conn 是直接防慢连接的关键**。
-```nginx
-limit_req_zone $binary_remote_addr zone=global_req:10m rate=10r/s;
-limit_conn_zone $binary_remote_addr zone=global_conn:10m;
-```
+### 管理 MCP
 
-### 4. 误封解封
+- 后端从 `0.0.0.0` 改为 `127.0.0.1`；
+- 删除后端端口的 UFW 公网放行；
+- 同步命令改为 `asyncio.to_thread`，避免阻塞事件循环；
+- 使用信号量限制并发命令数；
+- Nginx HTTPS 入口和认证保持不变。
 
-排查时把用户自己的出口 IP（171.219.95.42 成都电信 + ktor-client UA = RikkaHub）误判为攻击者封了——**幸好 ufw 顺序坑让封禁没生效，用户全程无感**。已解封。
+旧客户端若仍把 token 放在 URL 中，应尽快迁移到 Authorization header，随后轮换 token。仅停止新日志记录不能消除历史日志中已出现的凭据。
 
-### 5. 8002（racknerd-mcp）单进程隐患
+### tags 服务与 Supabase
 
-uvicorn 单进程 + subprocess.run(timeout=120) 同步阻塞：任何命令执行会堵住事件循环。已重启恢复，**建议改多进程或异步 subprocess（待办）**。
+tags 进程和 Nginx 一直正常，但访问数据库时报 DNS 解析失败。公共 DNS 对项目域名返回 NXDOMAIN，Supabase 控制面显示项目为 INACTIVE。恢复项目后：
 
-### 6. VMISS 磁盘清理（82% → 67%）
+- 项目状态回到健康；
+- 数据表记录仍在；
+- Supabase REST、本机健康检查和 Nginx 入口均返回 200；
+- `.env` 权限从 644 收紧为 600；
+- 增加每日只读查询的 systemd timer，降低免费项目因低活跃再次暂停的概率。
 
-journal 953M→56M、btmp 爆破记录 77M、syslog、旧日志、/tmp 缓存 213M、apt 139M→44K、npm 缓存。
+业务 `/tags` 的 401 与 Supabase key 是两套认证：Supabase key 只供后端访问数据库；客户端需先调用 `/login`，再使用登录返回的 Bearer token。当前登录 token 保存在进程内存中，服务重启后会失效，这是后续需要改进的会话设计。
 
-## 验证清单（更正版）
+## 仍待完成
 
-- [x] 两台服务器 uptime/负载正常
-- [x] 23 个攻击 IP 已用 fail2ban 有效封禁（非 ufw deny）
-- [x] fail2ban nginx-attack jail 自动封恶意扫描
-- [x] 全站限速 + 单 IP 连接上限（limit_req + limit_conn）
-- [x] sticker-mcp 恢复运行并开机自启
-- [x] radar 空壳 nginx 配置已移除
-- [x] 慢连接攻击机制钉死（见上）
-- [x] 所有服务从外部 curl 验证正常
+- 把依赖独立公网端口的服务迁到标准 HTTPS 域名或安全隧道；
+- 隐藏源站 IP，并在迁移完成后只允许可信代理访问 Web 入口；
+- 轮换曾出现在 URL 或历史日志中的管理 token；
+- 把内存登录会话改为可撤销、可过期的持久会话；
+- 为关键数据库和配置建立异机备份。
+
+## 排障清单
+
+- [x] 检查负载、内存、磁盘、OOM 和异常进程
+- [x] 检查 Nginx、上游端口和错误日志
+- [x] 区分完整 HTTP 请求、慢连接与 SYN 半连接
+- [x] 验证 Fail2Ban 过滤器和防火墙链
+- [x] 收紧后端监听地址与 UFW 规则
+- [x] 修复管理 MCP 的事件循环阻塞
+- [x] 恢复 tags 数据库并做三层验证
+- [ ] 完成源站隐藏和独立公网端口迁移
+- [ ] 完成管理 token 轮换
+
