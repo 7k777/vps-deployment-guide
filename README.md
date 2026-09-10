@@ -1,63 +1,52 @@
-# VPS 部署完整指南 + 踩坑记录
+# VPS 部署与安全运维记录
 
-> **一次从零开始部署个人 VPS 服务的完整记录**
->
-> 涵盖：服务器初始化 · 网络配置 · MCP 服务部署 · systemd 管理 · 10 个实战踩坑
+> 一份面向个人学习服务器的部署、排障与安全加固笔记。
 
----
+## 目录
 
-## 📋 目录
+- [基础环境](#基础环境)
+- [公网服务安全原则](#公网服务安全原则)
+- [常用检查命令](#常用检查命令)
+- [事故与维护记录](#事故与维护记录)
 
-- [1. 基础环境配置](#1-基础环境配置)
-- [2. VPS 管理服务的安全原则](#2-vps-管理服务的安全原则)
-- [3. 踩坑记录](#3-踩坑记录)
-- [4. 环境信息](#4-环境信息)
-- [5. 常用命令](#5-常用命令)
-- [6. 2026-08-11 更新：VPS失联 + SSE根治](#6-2026-08-11-更新vps失联--sse根治)
-- [7. 2026-08-16 更新：安全巡检 + 表情包 MCP](#7-2026-08-16-更新安全巡检--表情包-mcp)
-- [8. 2026-08-22 更新：SSH 加固 + Fail2Ban 验证](#8-2026-08-22-更新ssh-加固--fail2ban-验证)
+## 基础环境
 
----
-
-## 1. 基础环境配置
-
-### 1.1 购买 VPS 后的第一步
+首次登录后先更新系统，并为重启准备主机商控制台或 VNC：
 
 ```bash
-ssh root@你的IP
-apt update && apt upgrade -y
-reboot
+ssh <ADMIN_USER>@<SERVER_HOST>
+sudo apt update
+sudo apt upgrade -y
+sudo reboot
 ```
 
-> ⏳ 重启后 SSH 需要等 30~60 秒才能连上，别急
-
-### 1.2 防火墙配置
-
-开放必要的端口，其他全部关闭：
+防火墙只开放确实需要的入口。应用进程优先监听 `127.0.0.1`，通过 Nginx 的 80/443 反向代理，不要为每个后端单独开放公网端口：
 
 ```bash
-ufw allow 22      # SSH
-ufw allow 面板端口  # 管理面板
-ufw allow 8000    # MCP 服务
-ufw allow 18110   # 其他服务
-ufw enable
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+sudo ufw allow <SSH_PORT>/tcp
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
+sudo ufw enable
 ```
 
----
+修改 SSH 或防火墙前，必须保留旧会话，并从第二个终端验证新连接。
 
-## 2. VPS 管理服务的安全原则
+## 公网服务安全原则
 
-通过 MCP 或其他远程管理接口操作 VPS 时，**不要把能够执行任意 Shell 命令的接口直接暴露到公网**。即使是个人学习服务器，也至少需要：
+能够执行命令、读写数据或调用第三方 API 的管理服务不应裸露在公网。至少做到：
 
-- 身份认证：使用高强度随机 token、mTLS 或可信身份代理；
-- HTTPS：不要通过明文 HTTP 传输管理凭据；
-- 最小权限：服务使用专用低权限账户，避免长期以 root 运行；
-- 命令限制：优先提供明确、可审计的工具，不接受任意 `shell=True` 输入；
-- 网络限制：能走内网、VPN、Tailscale 或 SSH 隧道时，不直接开放公网端口；
-- 日志与限流：记录调用来源、操作和结果，并限制请求频率；
-- 密钥保护：token 与私钥放入环境变量或权限受限的配置文件，不提交到 GitHub。
+- 使用高强度随机凭据，凭据只放在权限为 600 的环境文件或密钥系统中；
+- 全程 HTTPS，日志不记录 URL 查询参数中的 token；
+- 应用监听回环地址，由 Nginx、VPN、Tailscale 或身份代理提供入口；
+- 后端使用专用低权限账户；确需 root 的管理工具应进一步限制入口与可执行能力；
+- 避免 `shell=True` 任意命令接口；无法避免时必须认证、限并发、记录审计并缩小网络暴露面；
+- 配置请求限速、单 IP 连接限制、合理的连接超时和 Fail2Ban；
+- Cloudflare 代理站点要配置可信代理网段和真实客户端 IP，不能信任任意来源伪造的转发头；
+- 服务停用时同时清理 Nginx、DNS、防火墙和开机自启配置。
 
-systemd 托管服务时，建议加入专用用户和基础沙箱限制：
+systemd 沙箱需根据实际读写目录调整：
 
 ```ini
 [Service]
@@ -74,102 +63,56 @@ ProtectHome=true
 ReadWritePaths=/var/lib/<SERVICE_NAME>
 ```
 
-> 具体限制需结合程序所需目录调整。若服务启动失败，先查看 `journalctl -u <SERVICE_NAME>`，不要为了省事直接改回 root。
-
-客户端只保存服务地址与认证信息；公开文档统一使用 `<SERVER_HOST>`、`<PORT>`、`<TOKEN>` 等占位符，不记录真实入口。
-
-
----
-
-## 3. 踩坑记录
-
-| # | 🕳️ 坑 | ✅ 解决方案 |
-|---|--------|------------|
-| 1 | SSH 密码登不上 | 用 VNC 登录后执行 `passwd` 修改密码 |
-| 2 | 重启后 SSH 连不上 | 等 30~60 秒让 SSHD 启动完成 |
-| 3 | `WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED` | `ssh-keygen -R 你的IP` 清除旧密钥缓存 |
-| 4 | `apt upgrade` 弹配置界面 | 直接回车，选默认选项 |
-| 5 | 网络连不上 | `ss -tlnp \| grep 443` 检查服务是否在监听 |
-| 6 | 杀进程把自己断连 | 确保新服务先跑起来，再杀旧的 |
-| 7 | 端口冲突 | 先停掉手动启动的进程，再让 systemd 接管 |
-| 8 | Node.js 版本太低 | 先 `apt-get remove -y libnode-dev`，再装 20.x |
-| 9 | 面板显示"运行中"但公网全不通 | IP 被限制 / 机房线路抽风——发工单、可尝试换 IP；也可能是临时抽风会自动恢复。**教训：别把重要服务+数据全押一台 VPS（单点故障）** |
-
-> 🗣️ **第一次做服务器运维，踩坑是正常的。每个坑都是一个学习机会。**
-
----
-
-## 4. 环境信息
-
-| 项目 | 详情 |
-|------|------|
-| **OS** | Ubuntu 22.04 LTS |
-| **运行环境** | Python 3.x, Node.js 20.x |
-
----
-
-## 5. 常用命令
+## 常用检查命令
 
 ```bash
-# 查看服务状态
-systemctl status vps-mcp
+# 资源与内核异常
+uptime
+free -h
+df -h
+journalctl -k --since "1 hour ago" | grep -Ei 'oom|killed process|segfault'
 
-# 查看日志
-journalctl -u vps-mcp --no-pager -n 20
+# 服务、监听与连接状态
+systemctl --failed
+systemctl status <SERVICE_NAME> --no-pager
+ss -lntup
+ss -s
+ss -Htan state syn-recv '( sport = :80 or sport = :443 )'
 
-# 检查端口监听
-ss -tlnp | grep -E "<SSH_PORT>|443|<SERVICE_PORT>"
+# Nginx 与 Fail2Ban
+sudo nginx -t
+sudo fail2ban-client status
+sudo fail2ban-client status <JAIL_NAME>
+sudo fail2ban-regex /var/log/nginx/access.log /etc/fail2ban/filter.d/<FILTER>.conf
 
-# 查看资源占用
-free -h && df -h
+# 防火墙
+sudo ufw status numbered
+sudo iptables -S | grep -i f2b
 ```
 
----
+### 判断原则
 
----
+1. `active` 只代表进程在运行，不代表业务请求成功。
+2. 本机 `curl` 成功不代表公网可达，应再从外部网络验证。
+3. Nginx `connect() failed (111)` 通常表示上游没有监听，不等于 Nginx 被打垮。
+4. 请求日志少不等于没有攻击；SYN flood 和未完成的 HTTP 连接可能尚未进入 access log。
+5. 延迟升高、封禁后恢复等时间相关性只能形成线索，不能单独当作攻击类型的定案证据。
 
-## 6. 2026-08-11 更新：VPS失联 + SSE根治
+## 事故与维护记录
 
-8月11日实录：VPS 突然公网失联（面板显示运行中但 ping/SSH 全超时，所有对外服务跟着断）+ 8000 SSE 频繁断连的根治方案（换成 Streamable HTTP，带 token 认证）。
+- [2026-08-11：VPS 失联与 Streamable HTTP](docs/2026-08-11-vps-outage-and-8002.md)
+- [2026-08-13：新机部署踩坑](docs/2026-08-13-racknerd-setup-pitfalls.md)
+- [2026-08-16：安全巡检与 sticker-mcp](docs/2026-08-16-security-audit-and-sticker-mcp.md)
+- [2026-08-22：SSH、Fail2Ban 与维护](docs/2026-08-22-ssh-fail2ban-and-server-maintenance.md)
+- [2026-08-22：SSH 配置覆盖与密钥格式](docs/2026-08-22-ssh-hardening-and-wakebridge.md)
+- [2026-09-10—11：攻击排障、SYN 防护与服务恢复](docs/2026-09-10-attack-traffic-and-sticker-revival.md)
 
-📄 完整记录见：[docs/2026-08-11-vps-outage-and-8002.md](docs/2026-08-11-vps-outage-and-8002.md)
+## 仍需完成的架构改进
 
-**一句话总结**：
-1. **VPS "运行中"但连不上** = IP 被限制或机房线路抽风 → 发工单 / 等恢复 / 换 IP；准备备用服务器防单点故障
-2. **SSE 老断** = 换 Streamable HTTP（`uvicorn.run(mcp.streamable_http_app())` + 关 DNS 重绑定保护 + 加 Bearer 认证）
+- 把仍依赖独立公网端口的服务迁到标准 HTTPS 域名或安全隧道，再关闭侧端口；
+- 隐藏源站 IP，仅允许可信代理访问 Web 入口；
+- 轮换曾经出现在 URL 或历史日志中的管理 token，并同步更新客户端；
+- 为关键数据库与配置建立异机备份和恢复演练。
 
----
+> 文档中的主机、账户、端口和凭据均使用占位符。不要把真实密钥、出口 IP 或管理入口提交到公开仓库。
 
-## 7. 2026-08-16 更新：安全巡检 + 表情包 MCP
-
-8月16日实录：深夜巡检抓出 **3.4 万次 SSH 暴力破解**（封 IP + 禁密码 + fail2ban + 建每周自动巡检），并把 **sticker-mcp**（AI 发表情包）从零部署上线。最大的坑：**UFW 假象**——nginx 报错导致命令链中断、`ufw allow` 没执行，本机自测 200 是假的（本地流量绕过防火墙），必须从外部机器测公网。
-
-📄 完整记录见：[docs/2026-08-16-security-audit-and-sticker-mcp.md](docs/2026-08-16-security-audit-and-sticker-mcp.md)
-
-**一句话总结**：
-1. **巡检要制度化**（crontab + 基线对比 + 告警），别靠"我记得"
-2. **禁密码前先验证密钥**，封 IP 要封源头
-3. **新端口必须外部测试**——本机自测 200 ≠ 公网通
-
----
-
-## 8. 2026-08-22 更新：SSH 加固 + Fail2Ban 验证
-
-8 月 22 日实录：发现 SSH 密码尝试后，完成 Fail2Ban 配置与防火墙链实际验证；从新终端验证私钥登录，确认密码认证关闭；并整理了内核升级后的安全重启与复查顺序。公开文档中的端口、用户与地址均使用占位符。
-
-> ✍️ 本次更新：**淇 & 澄**
-
-📄 完整记录见：[docs/2026-08-22-ssh-fail2ban-and-server-maintenance.md](docs/2026-08-22-ssh-fail2ban-and-server-maintenance.md)
-
-**一句话总结**：
-1. **先验证密钥，再禁密码**，始终保留旧会话作为退路
-2. **Fail2Ban 不能只看 running**，还要验证 jail、过滤器与防火墙链
-3. **远程重启先准备退路**，重启后复查 SSH、Fail2Ban、防火墙与监听端口
-
----
-
-> 🕐 2026.7.29~8.22 — **小七 & 林川 & 澄**
->
-> 如有帮助别忘了 ⭐ Star ~
-
-> 📝 **我会一直更新这个指南**，踩到新坑就记上来，希望能帮到更多第一次折腾 VPS 的人。
