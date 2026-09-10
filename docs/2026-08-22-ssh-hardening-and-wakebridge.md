@@ -1,38 +1,40 @@
-# 2026-08-22 实战：SSH 加固排查
+# 2026-08-22：SSH 配置覆盖与密钥格式排查
 
-## 1. 密码登录"改了没生效"的坑
+## 配置写了却没有生效
 
-症状：`sshd_config` 和 `sshd_config.d/99-hardening.conf` 都写了 `PasswordAuthentication no`，但 `sshd -T` 仍显示 `yes`。
-
-真凶：`/etc/ssh/sshd_config.d/60-cloudimg-settings.conf`（云镜像自动生成，默认 `PasswordAuthentication yes`）覆盖了 99 的 no。
-
-教训：验证必须用 `sudo sshd -T`（实际生效配置），不能只看配置文件。
-
-修复：把 60-cloudimg 也改成 no，然后 `systemctl restart ssh`，再用 `sshd -T` 验证。
-
-## 2. Windows 密钥 CRLF 坑
-
-症状：OpenSSH 私钥报 `invalid format`（`ssh -v` 显示 `identity file ... type -1`）。
-
-原因：用记事本/复制粘贴保存密钥文件，换行符是 CRLF，OpenSSH 不认。
-
-修复：`scp` 从服务器字节级复制最可靠，别手抄、别用记事本编辑密钥。
+`sshd_config` 和 drop-in 文件中即使出现 `PasswordAuthentication no`，也必须检查最终生效值：
 
 ```bash
-scp -i 本机密钥 -P 22022 root@SERVER:/服务器/密钥路径 本地路径
+sudo sshd -t
+sudo sshd -T | grep -Ei 'passwordauthentication|pubkeyauthentication|kbdinteractiveauthentication|permitrootlogin'
 ```
 
-## 3. 双机加固流程速查
+云镜像可能通过 `/etc/ssh/sshd_config.d/*.conf` 提供额外设置。不要只看某一个文件，也不要简单假设“文件名数字越大就一定覆盖”；OpenSSH 对部分关键字采用首次获得的值，应结合主配置中的 Include 顺序与 `sshd -T` 判断。
 
-1. 封爆破 IP：`ufw deny from <IP>`（全封）
-2. fail2ban：`apt install fail2ban && systemctl enable --now fail2ban`（默认自带 sshd jail）
-3. 禁密码：`echo 'PasswordAuthentication no' > /etc/ssh/sshd_config.d/99-hardening.conf && systemctl restart ssh && sshd -T` 验证
-4. 密钥验证：`ssh -v -i <key> -p <port> root@<ip>`（看 `Offering public key` 行）
+修改后优先平滑重载，并保留旧会话，直到第二个终端验证成功：
 
-## 4. 防火墙概念大白话
+```bash
+sudo systemctl reload ssh
+```
 
-- 端口 = 门（每扇门通向不同服务）
-- `Anywhere` = 谁都能进这扇门
-- `DENY <IP>` = 拉黑特定 IP
-- fail2ban = 自动门卫（反复敲错门自动拉黑）
-- systemd = 给服务办永久居留证（开机自动上岗）
+## Windows 私钥格式问题
+
+私钥被编辑器改写换行或编码后，OpenSSH 可能报告 `invalid format`。私钥应在本地生成并保持原始字节，不要通过聊天、剪贴板或仓库传递。
+
+```powershell
+ssh-keygen -t ed25519 -f C:\Users\<USER>\.ssh\<KEY_NAME>
+ssh -i C:\Users\<USER>\.ssh\<KEY_NAME> -p <SSH_PORT> <ADMIN_USER>@<SERVER_HOST>
+```
+
+服务器只保存公钥内容到 `~/.ssh/authorized_keys`。如果私钥已经通过不安全渠道传输，应重新生成密钥对并撤销旧公钥。
+
+## 加固检查表
+
+1. 本地生成密钥，只上传公钥；
+2. 第二个终端验证密钥登录；
+3. `sshd -t` 检查语法；
+4. `sshd -T` 检查最终生效值；
+5. 禁用密码与键盘交互认证；
+6. 启用并验证 Fail2Ban；
+7. 保留主机商控制台作为应急入口。
+
