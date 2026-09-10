@@ -53,6 +53,21 @@
 5. **废弃站点要拆干净**：服务停了，nginx 配置和 DNS 记录也要一起清理，否则攻击者天天来敲门。
 6. **同一攻击团伙会同时打多台服务器**：一台被攻击时，另一台也要查。
 
+## 补充：ufw deny 顺序坑（当晚最大发现）
+
+**ufw 的 `deny from <ip>` 规则如果加在 ALLOW 端口规则之后，对开放端口完全无效。**
+
+iptables 按顺序匹配：从被封 IP 到开放端口的连接会**先命中 ACCEPT（放行）**，DENY 规则根本轮不到。实测两台服务器手动封的 23 个攻击 IP 全部被这个坑废掉。
+
+**正确封禁姿势**：
+```bash
+# ❌ 无效（顺序坑）：ufw deny from <ip>
+# ✅ 有效（f2b 链在 INPUT 最前）：fail2ban-client set <jail> banip <ip>
+fail2ban-client set nginx-attack banip 43.110.38.5
+```
+
+**误封教训**：把用户自己的出口 IP（成都电信 + ktor-client UA = RikkaHub 特征）误判为攻击者封了——幸好顺序坑让封禁没生效，用户全程无感。**封 IP 前必须查归属和 UA**；5G 移动网络出口 IP 动态变化，别拿 IP 当封禁依据。
+
 ## 验证清单
 
 - [x] 两台服务器 uptime/负载正常
