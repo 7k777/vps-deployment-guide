@@ -44,6 +44,22 @@
 - 攻击者持续扫描该域名，nginx 日志刷满 111 错误
 - 处置：`rm /etc/nginx/sites-enabled/ai-needs-radar && nginx -t && systemctl reload nginx`
 
+## 补充：慢连接攻击——日志盲区（9/10 深夜追查钉死）
+
+**现象**：用户访问超时（"服务器已停止响应"），但 nginx access.log 请求数很少（107 条/30 分钟）、error.log 也正常——看起来"没被攻击"。
+
+**真相**：慢连接攻击（Slowloris 类）。攻击者建立连接后慢慢发数据/读响应，每个连接占住一个 nginx worker 槽位长达 proxy_read_timeout（300s），却不产生多少日志。
+
+**钉死机制的关键证据**：
+1. 事故时段某端口响应 5.1 秒（正常 0.15s）——worker 被占的实锤
+2. 封 IP 操作触发 ufw 重载（iptables-restore）→ 瞬间中断所有连接 → 攻击者慢连接断开 → worker 释放 → 服务器恢复
+3. 用户恢复时间点（封完 IP 后 3-13 分钟）与操作时间线完全吻合
+
+**教训**：
+- 排查"服务器慢/超时"不能只看请求数，要看**连接数**（ss -s、ESTABLISHED 统计）
+- 慢连接攻击是日志盲区：请求少、无错误日志、但 worker 被占满
+- **防御**：limit_conn（单 IP 连接上限）直接限制慢连接；fail2ban 封高频 IP；limit_req 限速
+
 ## 教训
 
 1. **「服务器停止响应」先查服务端再怪网络**：uptime + nginx error log 是第一步证据。
