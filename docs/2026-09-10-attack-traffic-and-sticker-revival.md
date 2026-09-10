@@ -84,11 +84,60 @@ fail2ban-client set nginx-attack banip 43.110.38.5
 
 **误封教训**：把用户自己的出口 IP（成都电信 + ktor-client UA = RikkaHub 特征）误判为攻击者封了——幸好顺序坑让封禁没生效，用户全程无感。**封 IP 前必须查归属和 UA**；5G 移动网络出口 IP 动态变化，别拿 IP 当封禁依据。
 
-## 验证清单
+## 后续补充（深夜追查新增）
+
+### 1. 更正：封禁姿势从 ufw 改为 fail2ban
+
+**ufw deny 对开放端口无效（顺序坑），23 个攻击 IP 已改用 fail2ban 有效封禁**：
+```bash
+fail2ban-client set nginx-attack banip <ip>
+```
+同时删除两台服务器上所有无效的 `ufw deny from <ip>` 规则。
+
+### 2. fail2ban nginx-attack jail（自动封恶意扫描）
+
+两台服务器都配置了 nginx-attack jail：检测高频 4xx/5xx + phpunit/thinkphp/pearcmd/.env/.git 等攻击路径，3 次命中封 24h。
+```bash
+# /etc/fail2ban/filter.d/nginx-attack.conf
+failregex = ^<HOST> .* "(GET|POST|HEAD) .*(phpunit|thinkphp|pearcmd|\.env|\.git|wp-admin|wp-login|eval-stdin|/containers/json|actuator|solr|struts|web-inf|admin\.php|config\.php) .*" (4\d\d|5\d\d)
+# /etc/fail2ban/jail.d/nginx-attack.local
+[nginx-attack]
+enabled = true
+port = http,https
+filter = nginx-attack
+logpath = /var/log/nginx/access.log
+maxretry = 3
+findtime = 300
+bantime = 86400
+```
+
+### 3. 全站限速 + 单 IP 连接上限
+
+两台 nginx 都加了 limit_req（10r/s）+ limit_conn（单 IP 20 连接），MCP 端点单独放宽（burst 100）。**limit_conn 是直接防慢连接的关键**。
+```nginx
+limit_req_zone $binary_remote_addr zone=global_req:10m rate=10r/s;
+limit_conn_zone $binary_remote_addr zone=global_conn:10m;
+```
+
+### 4. 误封解封
+
+排查时把用户自己的出口 IP（171.219.95.42 成都电信 + ktor-client UA = RikkaHub）误判为攻击者封了——**幸好 ufw 顺序坑让封禁没生效，用户全程无感**。已解封。
+
+### 5. 8002（racknerd-mcp）单进程隐患
+
+uvicorn 单进程 + subprocess.run(timeout=120) 同步阻塞：任何命令执行会堵住事件循环。已重启恢复，**建议改多进程或异步 subprocess（待办）**。
+
+### 6. VMISS 磁盘清理（82% → 67%）
+
+journal 953M→56M、btmp 爆破记录 77M、syslog、旧日志、/tmp 缓存 213M、apt 139M→44K、npm 缓存。
+
+## 验证清单（更正版）
 
 - [x] 两台服务器 uptime/负载正常
-- [x] 20 个攻击 IP 已封禁（ufw deny）
-- [x] fail2ban active
+- [x] 23 个攻击 IP 已用 fail2ban 有效封禁（非 ufw deny）
+- [x] fail2ban nginx-attack jail 自动封恶意扫描
+- [x] 全站限速 + 单 IP 连接上限（limit_req + limit_conn）
 - [x] sticker-mcp 恢复运行并开机自启
 - [x] radar 空壳 nginx 配置已移除
+- [x] 慢连接攻击机制钉死（见上）
 - [x] 所有服务从外部 curl 验证正常
