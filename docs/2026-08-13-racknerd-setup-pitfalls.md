@@ -1,61 +1,67 @@
-# RackNerd 新机部署实战：踩坑记录（2026-08-13）
+# 新 VPS 部署踩坑记录（2026-08-13）
 
-给新 VPS（RackNerd 洛杉矶 DC03，Ubuntu 22.04）做初始部署时踩的坑。
+## 长命令被远程工具超时
 
-## 坑1：耗时命令超时
-
-apt install / npm install 等长命令在 MCP 客户端会被取消（超时），看起来像"卡死/失败"。
-
-解法：nohup 后台跑 + 重定向日志 + 分次轮询，别在前台等。
+`apt install`、`npm install` 等操作可能超过远程管理工具的超时时间。使用 systemd 临时单元或 `nohup` 后台执行，并通过日志轮询结果：
 
 ```bash
-nohup apt-get install -y <包名> > /tmp/apt.log 2>&1 &
-# 轮询：
-tail -f /tmp/apt.log
+sudo systemd-run --unit=oneoff-install --collect \
+  /bin/sh -c 'apt-get install -y <PACKAGE>'
+journalctl -u oneoff-install -f
 ```
 
-## 坑2：unattended-upgrades 锁 dpkg
+不要因为客户端超时就重复启动多个安装进程。
 
-新机器首次开机后自动更新会锁住 dpkg，apt 装啥都卡（报 dpkg lock）。
+## dpkg 锁被自动更新占用
 
-解法：彻底禁用 unattended-upgrades，再清 stale 锁。
+先确认持锁进程是否仍在正常工作：
 
 ```bash
-systemctl mask unattended-upgrades
-pkill -f unattended-upgrades
-rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock
-apt-get update
-apt-get install -f
+sudo systemctl status apt-daily.service apt-daily-upgrade.service --no-pager
+ps aux | grep -E 'apt|dpkg|unattended'
+sudo lsof /var/lib/dpkg/lock-frontend
 ```
 
-## 坑3：Ubuntu 22.04 自带 node 太老（12.x）
+通常应等待自动更新完成。不要在 apt/dpkg 仍运行时强杀进程或删除锁文件，否则可能破坏包管理数据库。
 
-系统自带 node 是 12，跑现代项目直接报错。用 nodesource 装 node 20：
+若确认进程已经异常退出，再执行恢复：
 
 ```bash
-curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-apt install -y nodejs
-node -v  # 20.x
+sudo dpkg --configure -a
+sudo apt-get -f install
+sudo apt-get update
 ```
 
-## 坑6：SSH 加固三件套
+不建议为了避开一次锁冲突永久禁用 `unattended-upgrades`，它承担安全更新职责。
 
-新机器到手先做：改端口 + 密钥登录 + 禁密码。
+## Node.js 版本
+
+先检查项目声明的版本，再选择系统包、NodeSource 或版本管理器，并固定主版本：
 
 ```bash
-# 1. 改端口（sshd_config 追加）
-echo 'Port 22022' >> /etc/ssh/sshd_config
-systemctl restart sshd
-
-# 2. 密钥登录
-ssh-keygen -t ed25519 -f ~/.ssh/<name>_key -N ""
-cat ~/.ssh/<name>_key.pub >> ~/.ssh/authorized_keys
-
-# 3. 禁密码
-sed -i 's/^#PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
-systemctl restart sshd
+node --version
+cat package.json | grep -A3 engines
 ```
 
-注意：HOME 未设置时 `~` 不会展开，密钥会生成到字面 `~` 目录——务必先确认 HOME 变量。
+不要默认所有项目都必须使用同一个最新 Node.js 版本。
 
-（坑4/坑5 为网络相关项，公开仓库合规脱敏，不入库）
+## SSH 加固顺序
+
+私钥应在可信的本地设备生成，服务器只接收公钥：
+
+```bash
+# 在本地执行
+ssh-keygen -t ed25519 -f <LOCAL_KEY_PATH>
+ssh-copy-id -i <LOCAL_KEY_PATH>.pub -p <SSH_PORT> <ADMIN_USER>@<SERVER_HOST>
+```
+
+随后保留旧会话，用第二个终端验证密钥登录。验证成功后再禁用密码认证：
+
+```bash
+sudo sshd -t
+sudo systemctl reload ssh
+sudo sshd -T | grep -Ei 'passwordauthentication|pubkeyauthentication|kbdinteractiveauthentication'
+```
+
+不要在服务器上生成私钥再把私钥复制到客户端，也不要把私钥放进项目目录或 Git 仓库。
+
