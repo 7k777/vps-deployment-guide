@@ -116,3 +116,6 @@ sudo iptables -S | grep -i f2b
 
 > 文档中的主机、账户、端口和凭据均使用占位符。不要把真实密钥、出口 IP 或管理入口提交到公开仓库。
 
+## License
+
+Copyright © 2026 7k777. 本仓库原创文档采用 **Creative Commons Attribution-ShareAlike 4.0 International (CC BY-SA 4.0)**：转载或改编时须按许可证要求署名，并以相同方式共享改编内容。第三方材料仍遵循其各自许可。详见 [LICENSE](LICENSE)。
